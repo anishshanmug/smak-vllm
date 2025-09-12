@@ -8,7 +8,6 @@ version = "0.2.0"
 description = "a lightweight vLLM implementation built from scratch"
 authors = ["Xingkai Yu"]
 license = "MIT"
-readme = "README.md"
 homepage = "https://github.com/GeeeekExplorer/nano-vllm"
 packages = [{include = "nanovllm"}]
 
@@ -17,5 +16,5 @@ python = ">=3.10,<3.13"
 torch = ">=2.4.0"
 triton = ">=3.0.0"
 transformers = ">=4.51.0"
-flash-attn = "*"
 xxhash = "*"
+# flash-attn installed via prebuilt wheel in Modal image
