@@ -134,7 +134,7 @@ def main():
     print(f"✅ Model available at: {model_path}")
     
     # Step 2: Run inference using model from volume
-    print("🚀 Running inference with T4 GPU...")
+    print("🚀 Running inference with GPU...")
     result = run_inference.remote(model_id)
     print(result)
     
