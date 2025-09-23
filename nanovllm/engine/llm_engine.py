@@ -56,6 +56,12 @@ class LLMEngine:
     def is_finished(self):
         return self.scheduler.is_finished()
 
+    def process_scheduler(self):
+        # Sort the waiting deque in-place by num_prompt_tokens (ascending)
+        self.scheduler.waiting = type(self.scheduler.waiting)(
+            sorted(self.scheduler.waiting, key=lambda seq: seq.num_prompt_tokens)
+        )
+
     def generate(
         self,
         prompts: list[str] | list[list[int]],
@@ -68,6 +74,7 @@ class LLMEngine:
             sampling_params = [sampling_params] * len(prompts)
         for prompt, sp in zip(prompts, sampling_params):
             self.add_request(prompt, sp)
+        self.process_scheduler()
         outputs = {}
         prefill_throughput = decode_throughput = 0.
         while not self.is_finished():
