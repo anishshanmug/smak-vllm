@@ -1,6 +1,9 @@
 import atexit
+import asyncio
+import uuid
 from dataclasses import fields
 from time import perf_counter
+from typing import Dict, List, Optional
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
 import torch.multiprocessing as mp
@@ -31,19 +34,115 @@ class LLMEngine:
         self.tokenizer = AutoTokenizer.from_pretrained(config.model, use_fast=True)
         config.eos = self.tokenizer.eos_token_id
         self.scheduler = Scheduler(config)
+        
+        # Async engine state
+        self._running = False
+        self._engine_task: Optional[asyncio.Task] = None
+        self._pending_requests: Dict[str, Dict] = {}  # request_id -> request_data
+        self._sequence_to_request: Dict[int, str] = {}  # seq_id -> request_id
+        self._loop = None
+        
         atexit.register(self.exit)
 
+    def _start_background_engine(self):
+        """Start the continuous background processing loop"""
+        if not self._running:
+            self._running = True
+            try:
+                self._loop = asyncio.get_running_loop()
+            except RuntimeError:
+                # No event loop running, create one
+                self._loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(self._loop)
+            
+            self._engine_task = self._loop.create_task(self._engine_loop())
+    
+    async def _engine_loop(self):
+        """Continuously process scheduler steps"""
+        while self._running:
+            if not self.scheduler.is_finished():
+                output, num_tokens = self.step()
+                self._handle_completed_sequences(output)
+            else:
+                await asyncio.sleep(0.001)  # Small delay when idle
+    
+    def _handle_completed_sequences(self, completed_outputs):
+        """Route completed sequences to their original generate() calls"""
+        for seq_id, token_ids in completed_outputs:
+            request_id = self._sequence_to_request.get(seq_id)
+            if request_id and request_id in self._pending_requests:
+                request_data = self._pending_requests[request_id]
+                
+                # Store this sequence's result
+                request_data["results"][seq_id] = {
+                    "text": self.tokenizer.decode(token_ids),
+                    "token_ids": token_ids
+                }
+                
+                # Check if this request is complete
+                expected_count = len(request_data["sequence_ids"])
+                actual_count = len(request_data["results"])
+                
+                if actual_count == expected_count:
+                    # All sequences for this request are done
+                    results = [request_data["results"][seq_id] 
+                              for seq_id in request_data["sequence_ids"]]
+                    request_data["future"].set_result(results)
+                    
+                    # Cleanup sequence tracking
+                    for seq_id in request_data["sequence_ids"]:
+                        if seq_id in self._sequence_to_request:
+                            del self._sequence_to_request[seq_id]
+    
+    async def shutdown(self):
+        """Gracefully shutdown the background engine"""
+        self._running = False
+        if self._engine_task:
+            await self._engine_task
+        self.exit()
+
     def exit(self):
+        """Synchronous cleanup"""
+        self._running = False
+        if self._engine_task and not self._engine_task.done():
+            self._engine_task.cancel()
+        
         self.model_runner.call("exit")
         del self.model_runner
         for p in self.ps:
             p.join()
 
-    def add_request(self, prompt: str | list[int], sampling_params: SamplingParams):
+    def add_request(self, prompt: str | list[int], sampling_params: SamplingParams, request_id: str = None):
+        """Add a single request, optionally part of a larger request group"""
         if isinstance(prompt, str):
             prompt = self.tokenizer.encode(prompt)
         seq = Sequence(prompt, sampling_params)
+        
+        # Track which request this sequence belongs to
+        if request_id:
+            self._sequence_to_request[seq.seq_id] = request_id
+            
         self.scheduler.add(seq)
+        return seq.seq_id
+    
+    def _submit_batch_request(self, prompts: List[str | List[int]], sampling_params: List[SamplingParams]) -> str:
+        """Submit multiple prompts as one logical request"""
+        request_id = str(uuid.uuid4())
+        future = asyncio.Future()
+        
+        # Add all prompts with same request_id
+        sequence_ids = []
+        for prompt, sp in zip(prompts, sampling_params):
+            seq_id = self.add_request(prompt, sp, request_id)
+            sequence_ids.append(seq_id)
+        
+        self._pending_requests[request_id] = {
+            "sequence_ids": sequence_ids,
+            "future": future,
+            "results": {}
+        }
+        
+        return request_id
 
     def step(self):
         seqs, is_prefill = self.scheduler.schedule()
@@ -62,6 +161,7 @@ class LLMEngine:
         sampling_params: SamplingParams | list[SamplingParams],
         use_tqdm: bool = True,
     ) -> list[str]:
+        """Synchronous generate - for backward compatibility"""
         if use_tqdm:
             pbar = tqdm(total=len(prompts), desc="Generating", dynamic_ncols=True)
         if not isinstance(sampling_params, list):
@@ -91,3 +191,28 @@ class LLMEngine:
         if use_tqdm:
             pbar.close()
         return outputs
+    
+    async def generate_async(
+        self,
+        prompts: list[str] | list[list[int]],
+        sampling_params: SamplingParams | list[SamplingParams],
+    ) -> list[dict]:
+        """Async generate - returns only results for THIS call"""
+        
+        # Normalize inputs
+        if not isinstance(sampling_params, list):
+            sampling_params = [sampling_params] * len(prompts)
+        
+        # Start background engine if not running
+        if not self._running:
+            self._start_background_engine()
+        
+        # Submit request and get tracking ID
+        request_id = self._submit_batch_request(prompts, sampling_params)
+        
+        # Wait for completion
+        results = await self._pending_requests[request_id]["future"]
+        
+        # Cleanup and return
+        del self._pending_requests[request_id]
+        return results
