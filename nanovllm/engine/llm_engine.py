@@ -96,6 +96,7 @@ class LLMEngine:
     
     async def shutdown(self):
         """Gracefully shutdown the background engine"""
+        atexit.unregister(self.exit)  # ← Prevent double cleanup
         self._running = False
         if self._engine_task:
             await self._engine_task
@@ -192,7 +193,7 @@ class LLMEngine:
             pbar.close()
         return outputs
     
-    async def generate_async(
+    async def agenerate(
         self,
         prompts: list[str] | list[list[int]],
         sampling_params: SamplingParams | list[SamplingParams],
