@@ -28,16 +28,22 @@ image = (
 
 app = modal.App("nano-vllm", image=image)
 MODEL_STORE_PATH = "/vol/models"
-volume = modal.Volume.from_name("nano-vllm-models", create_if_missing=False)
+LOGS_PATH = "/vol/logs"
+model_volume = modal.Volume.from_name("nano-vllm-models", create_if_missing=False)
+logs_volume = modal.Volume.from_name("nano-vllm-logs", create_if_missing=True)
 
-@app.function(gpu="A10", volumes={MODEL_STORE_PATH: volume})
-async def load_test(num_trials: int = 5):
+@app.function(gpu="A10", volumes={MODEL_STORE_PATH: model_volume, LOGS_PATH: logs_volume})
+async def load_test(num_trials: int = 5, debug: bool = True):
     import os
     import time
     import asyncio
     from random import randint, seed
     from nanovllm import LLM, SamplingParams
     
+    # Enable internal nano-vllm debug prints inside the Modal container.
+    # This is intentionally opt-in via the load_test() arg.
+    if debug:
+        os.environ["NANOVLLM_DEBUG"] = "1"
 
     path = "/vol/models/Qwen_Qwen3-0.6B"
     llm = LLM(path, enforce_eager=False, max_model_len=4096)
@@ -51,6 +57,9 @@ async def load_test(num_trials: int = 5):
 
     # Proper shutdown
     await llm.shutdown()
+    
+    # Commit logs volume so debug logs persist
+    logs_volume.commit()
     
     avg_throughput = sum(throughputs) / len(throughputs)
     print(f"\nAverage throughput: {avg_throughput:.2f} tok/s")

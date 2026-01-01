@@ -1,4 +1,6 @@
 import pickle
+import os
+import json
 import torch
 import torch.distributed as dist
 from multiprocessing.synchronize import Event
@@ -10,6 +12,7 @@ from nanovllm.models.qwen3 import Qwen3ForCausalLM
 from nanovllm.layers.sampler import Sampler
 from nanovllm.utils.context import set_context, get_context, reset_context
 from nanovllm.utils.loader import load_model
+from nanovllm.utils.debug_log import debug_log, is_debug_enabled
 
 
 class ModelRunner:
@@ -31,6 +34,7 @@ class ModelRunner:
         self.model = Qwen3ForCausalLM(hf_config)
         load_model(self.model, config.model)
         self.sampler = Sampler()
+        self._debug = is_debug_enabled()
         self.warmup_model()
         self.allocate_kv_cache()
         if not self.enforce_eager:
@@ -187,22 +191,80 @@ class ModelRunner:
 
     @torch.inference_mode()
     def run_model(self, input_ids: torch.Tensor, positions: torch.Tensor, is_prefill: bool):
-        if is_prefill or self.enforce_eager or input_ids.size(0) > 512:
-            return self.model.compute_logits(self.model(input_ids, positions))
-        else:
-            bs = input_ids.size(0)
-            context = get_context()
-            graph = self.graphs[next(x for x in self.graph_bs if x >= bs)]
-            graph_vars = self.graph_vars
-            graph_vars["input_ids"][:bs] = input_ids
-            graph_vars["positions"][:bs] = positions
-            graph_vars["slot_mapping"].fill_(-1)
-            graph_vars["slot_mapping"][:bs] = context.slot_mapping
-            graph_vars["context_lens"].zero_()
-            graph_vars["context_lens"][:bs] = context.context_lens
-            graph_vars["block_tables"][:bs, :context.block_tables.size(1)] = context.block_tables
-            graph.replay()
-            return self.model.compute_logits(graph_vars["outputs"][:bs])
+        if self._debug:
+            free, total = torch.cuda.mem_get_info()
+            dbg = {
+                "event": "pre_forward",
+                "is_prefill": is_prefill,
+                "input_tokens": int(input_ids.numel()),
+                "positions_tokens": int(positions.numel()),
+                "batch_size": int(input_ids.size(0)),
+                "cuda": {
+                    "free_gb": float(free) / (1024**3),
+                    "total_gb": float(total) / (1024**3),
+                    "alloc_gb": float(torch.cuda.memory_allocated()) / (1024**3),
+                    "reserved_gb": float(torch.cuda.memory_reserved()) / (1024**3),
+                    "peak_alloc_gb": float(torch.cuda.max_memory_allocated()) / (1024**3),
+                },
+            }
+            debug_log(dbg)
+        
+        try:
+            if is_prefill or self.enforce_eager or input_ids.size(0) > 512:
+                out = self.model.compute_logits(self.model(input_ids, positions))
+            else:
+                bs = input_ids.size(0)
+                context = get_context()
+                graph = self.graphs[next(x for x in self.graph_bs if x >= bs)]
+                graph_vars = self.graph_vars
+                graph_vars["input_ids"][:bs] = input_ids
+                graph_vars["positions"][:bs] = positions
+                graph_vars["slot_mapping"].fill_(-1)
+                graph_vars["slot_mapping"][:bs] = context.slot_mapping
+                graph_vars["context_lens"].zero_()
+                graph_vars["context_lens"][:bs] = context.context_lens
+                graph_vars["block_tables"][:bs, :context.block_tables.size(1)] = context.block_tables
+                graph.replay()
+                out = self.model.compute_logits(graph_vars["outputs"][:bs])
+        
+        except torch.OutOfMemoryError as e:
+            if self._debug:
+                free, total = torch.cuda.mem_get_info()
+                dbg = {
+                    "event": "oom_in_run_model",
+                    "is_prefill": is_prefill,
+                    "input_tokens": int(input_ids.numel()),
+                    "positions_tokens": int(positions.numel()),
+                    "batch_size": int(input_ids.size(0)),
+                    "cuda": {
+                        "free_gb": float(free) / (1024**3),
+                        "total_gb": float(total) / (1024**3),
+                        "alloc_gb": float(torch.cuda.memory_allocated()) / (1024**3),
+                        "reserved_gb": float(torch.cuda.memory_reserved()) / (1024**3),
+                        "peak_alloc_gb": float(torch.cuda.max_memory_allocated()) / (1024**3),
+                    },
+                    "err": str(e),
+                }
+                debug_log(dbg)
+            raise
+        
+        if self._debug:
+            free, total = torch.cuda.mem_get_info()
+            dbg = {
+                "event": "post_forward",
+                "is_prefill": is_prefill,
+                "logits_shape": list(out.shape),
+                "cuda": {
+                    "free_gb": float(free) / (1024**3),
+                    "total_gb": float(total) / (1024**3),
+                    "alloc_gb": float(torch.cuda.memory_allocated()) / (1024**3),
+                    "reserved_gb": float(torch.cuda.memory_reserved()) / (1024**3),
+                    "peak_alloc_gb": float(torch.cuda.max_memory_allocated()) / (1024**3),
+                },
+            }
+            debug_log(dbg)
+        
+        return out
 
     def run(self, seqs: list[Sequence], is_prefill: bool) -> list[int]:
         input_ids, positions = self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)

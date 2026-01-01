@@ -1,8 +1,10 @@
+import os
 from collections import deque
 
 from nanovllm.config import Config
 from nanovllm.engine.sequence import Sequence, SequenceStatus
 from nanovllm.engine.block_manager import BlockManager
+from nanovllm.utils.debug_log import debug_log, is_debug_enabled
 
 
 class Scheduler:
@@ -14,6 +16,7 @@ class Scheduler:
         self.block_manager = BlockManager(config.num_kvcache_blocks, config.kvcache_block_size)
         self.waiting: deque[Sequence] = deque()
         self.running: deque[Sequence] = deque()
+        self._debug = is_debug_enabled()
 
     def is_finished(self):
         return not self.waiting and not self.running
@@ -38,6 +41,24 @@ class Scheduler:
             self.running.append(seq)
             scheduled_seqs.append(seq)
         if scheduled_seqs:
+            is_prefill = True
+            if self._debug:
+                dbg = {
+                    "event": "schedule",
+                    "is_prefill": is_prefill,
+                    "num_seqs": len(scheduled_seqs),
+                    "num_batched_tokens": num_batched_tokens,
+                    "queues": {
+                        "waiting": len(self.waiting),
+                        "running": len(self.running),
+                    },
+                    "kv_blocks": {
+                        "free": len(self.block_manager.free_block_ids),
+                        "used": len(self.block_manager.used_block_ids),
+                        "total": len(self.block_manager.blocks),
+                    },
+                }
+                debug_log(dbg)
             return scheduled_seqs, True
 
         # decode
@@ -55,6 +76,26 @@ class Scheduler:
                 scheduled_seqs.append(seq)
         assert scheduled_seqs
         self.running.extendleft(reversed(scheduled_seqs))
+        
+        is_prefill = False
+        if self._debug:
+            dbg = {
+                "event": "schedule",
+                "is_prefill": is_prefill,
+                "num_seqs": len(scheduled_seqs),
+                "num_batched_tokens": len(scheduled_seqs),
+                "queues": {
+                    "waiting": len(self.waiting),
+                    "running": len(self.running),
+                },
+                "kv_blocks": {
+                    "free": len(self.block_manager.free_block_ids),
+                    "used": len(self.block_manager.used_block_ids),
+                    "total": len(self.block_manager.blocks),
+                },
+            }
+            debug_log(dbg)
+        
         return scheduled_seqs, False
 
     def preempt(self, seq: Sequence):
