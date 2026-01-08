@@ -43,7 +43,10 @@ async def load_test(num_trials: int = 5, debug: bool = True):
     # Enable internal nano-vllm debug prints inside the Modal container.
     # This is intentionally opt-in via the load_test() arg.
     if debug:
+        from datetime import datetime
         os.environ["NANOVLLM_DEBUG"] = "1"
+        # Set timestamp for this run so all logs use the same filename
+        os.environ["NANOVLLM_DEBUG_TIMESTAMP"] = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     path = "/vol/models/Qwen_Qwen3-0.6B"
     llm = LLM(path, enforce_eager=False, max_model_len=4096)
