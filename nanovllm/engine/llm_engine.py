@@ -61,7 +61,8 @@ class LLMEngine:
         """Continuously process scheduler steps"""
         while self._running:
             if not self.scheduler.is_finished():
-                output, num_tokens = self.step()
+                #output, num_tokens = self.step()
+                output, num_tokens = await asyncio.to_thread(self.step)
                 self._handle_completed_sequences(output)
             else:
                 await asyncio.sleep(0.001)  # Small delay when idle
