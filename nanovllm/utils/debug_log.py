@@ -1,5 +1,6 @@
 import os
 import json
+import time
 from datetime import datetime
 
 # download logs:  poetry run modal volume get nano-vllm-logs nanovllm_debug_*.log logs/
@@ -37,6 +38,7 @@ def debug_log(msg: str | dict):
         return
     
     if isinstance(msg, dict):
+        msg = {"ts": time.perf_counter(), **msg}
         line = "[nanovllm-debug] " + json.dumps(msg, sort_keys=True)
     else:
         line = msg

@@ -8,7 +8,7 @@ image = (
     .entrypoint([])  # removes chatty prints on entry
     .pip_install("ninja", "packaging", "wheel", "torch")
     .pip_install("flash-attn", extra_options="--no-build-isolation")
-    .pip_install("transformers>=4.51.0", "xxhash")
+    .pip_install("transformers>=4.51.0,<5.0.0", "xxhash")
     .apt_install(["git", "build-essential"])
     # Add local files LAST - Modal will install them at runtime
     .add_local_dir("nanovllm", "/root/nanovllm")

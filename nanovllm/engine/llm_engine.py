@@ -68,15 +68,21 @@ class LLMEngine:
     
     def _handle_completed_sequences(self, completed_outputs):
         """Route completed sequences to their original generate() calls"""
-        for seq_id, token_ids in completed_outputs:
+        for seq_id, token_ids, seq in completed_outputs:
             request_id = self._sequence_to_request.get(seq_id)
             if request_id and request_id in self._pending_requests:
                 request_data = self._pending_requests[request_id]
-                
+
+                ttft = (seq.first_token_time - seq.submit_time) if seq.first_token_time and seq.submit_time else None
+                e2e_latency = (seq.finish_time - seq.submit_time) if seq.finish_time and seq.submit_time else None
+
                 # Store this sequence's result
                 request_data["results"][seq_id] = {
                     "text": self.tokenizer.decode(token_ids),
-                    "token_ids": token_ids
+                    "token_ids": token_ids,
+                    "ttft": ttft,
+                    "e2e_latency": e2e_latency,
+                    "num_output_tokens": len(token_ids),
                 }
                 
                 # Check if this request is complete
@@ -149,7 +155,7 @@ class LLMEngine:
         seqs, is_prefill = self.scheduler.schedule()
         token_ids = self.model_runner.call("run", seqs, is_prefill)
         self.scheduler.postprocess(seqs, token_ids)
-        outputs = [(seq.seq_id, seq.completion_token_ids) for seq in seqs if seq.is_finished]
+        outputs = [(seq.seq_id, seq.completion_token_ids, seq) for seq in seqs if seq.is_finished]
         num_tokens = sum(len(seq) for seq in seqs) if is_prefill else -len(seqs)
         return outputs, num_tokens
 
@@ -183,7 +189,7 @@ class LLMEngine:
                     "Prefill": f"{int(prefill_throughput)}tok/s",
                     "Decode": f"{int(decode_throughput)}tok/s",
                 })
-            for seq_id, token_ids in output:
+            for seq_id, token_ids, _seq in output:
                 outputs[seq_id] = token_ids
                 if use_tqdm:
                     pbar.update(1)
