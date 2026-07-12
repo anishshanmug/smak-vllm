@@ -2,8 +2,10 @@
 Benchmark dashboard — fetches results from Modal volume and serves a local webapp.
 
 Usage:
-    python scripts/bench_dashboard.py                     # latest run
-    python scripts/bench_dashboard.py --timestamp 20260710_171500
+    python scripts/bench_dashboard.py                              # latest bench run
+    python scripts/bench_dashboard.py --timestamp 20260710_171500    # specific bench run
+    python scripts/bench_dashboard.py --sweep                        # latest sweep_*.json
+    python scripts/bench_dashboard.py --sweep --timestamp 20260712_010459
     python scripts/bench_dashboard.py --port 8787
 """
 
@@ -25,11 +27,40 @@ PORT = 8787
 # Modal volume helpers
 # ---------------------------------------------------------------------------
 
-def fetch_volume_files(timestamp: str | None) -> tuple[dict, list[dict]]:
-    """Pull bench JSON + debug log from the Modal logs volume.
+def _list_sweep_files(paths: list[str]) -> list[str]:
+    return sorted(p for p in paths if re.match(r"sweep_\d{8}_\d{6}\.json", p))
 
-    Returns (bench_data, debug_events) where debug_events is a list of parsed
-    log-line dicts (only schedule / preempt / trial_start / trial_end events).
+
+def _pick_sweep_file(paths: list[str], timestamp: str | None) -> str:
+    sweep_files = _list_sweep_files(paths)
+    if not sweep_files:
+        raise FileNotFoundError("No sweep_*.json files found in nano-vllm-logs volume.")
+
+    if timestamp:
+        sweep_path = f"sweep_{timestamp}.json"
+        if sweep_path not in sweep_files:
+            raise FileNotFoundError(
+                f"{sweep_path} not found. Available: {sweep_files}"
+            )
+        return sweep_path
+    return sweep_files[-1]
+
+
+def fetch_sweep_only(timestamp: str | None) -> dict:
+    """Load only a sweep_TIMESTAMP.json from the Modal logs volume."""
+    volume = modal.Volume.from_name(LOGS_VOLUME)
+    paths = [e.path for e in volume.listdir("/")]
+    sweep_path = _pick_sweep_file(paths, timestamp)
+    print(f"Fetching {sweep_path} ...")
+    sweep_bytes = b"".join(volume.read_file(sweep_path))
+    return json.loads(sweep_bytes)
+
+
+def fetch_volume_files(timestamp: str | None) -> tuple[dict, list[dict], dict | None]:
+    """Pull bench JSON + debug log (+ optional sweep JSON) from the Modal logs volume.
+
+    Returns (bench_data, debug_events, sweep_data).
+    sweep_data is loaded from sweep_*.json (matching timestamp if given, else latest).
     """
     volume = modal.Volume.from_name(LOGS_VOLUME)
     entries = volume.listdir("/")
@@ -45,7 +76,21 @@ def fetch_volume_files(timestamp: str | None) -> tuple[dict, list[dict]]:
     debug_bytes = b"".join(volume.read_file(debug_path))
     debug_events = _parse_debug_log(debug_bytes.decode())
 
-    return bench_data, debug_events
+    sweep_data = None
+    sweep_files = _list_sweep_files(paths)
+    if sweep_files:
+        # Prefer sweep file matching --timestamp, else bench run timestamp, else latest
+        sweep_ts = timestamp or bench_data.get("timestamp")
+        sweep_path = f"sweep_{sweep_ts}.json" if sweep_ts else None
+        if sweep_path and sweep_path in sweep_files:
+            pass
+        else:
+            sweep_path = sweep_files[-1]
+        print(f"Fetching {sweep_path} ...")
+        sweep_bytes = b"".join(volume.read_file(sweep_path))
+        sweep_data = json.loads(sweep_bytes)
+
+    return bench_data, debug_events, sweep_data
 
 
 def _pick_files(paths: list[str], timestamp: str | None) -> tuple[str, str]:
@@ -149,6 +194,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
 <div class="params-bar" id="params-bar"></div>
 
+<div id="bench-section">
 <h2>Metrics Summary</h2>
 <div class="table-wrap">
 <table id="metrics-table">
@@ -177,13 +223,55 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <div class="card"><h3>Decode Padding Waste (%)</h3><canvas id="chart-padding"></canvas></div>
   <div class="card"><h3>GPU Busy % (smoothed)</h3><canvas id="chart-gpu"></canvas></div>
 </div>
+</div>
+
+<div id="sweep-section" style="display:none">
+  <h2 style="margin-top:36px">Saturation Sweep</h2>
+  <div class="subtitle" id="sweep-subtitle"></div>
+  <div class="charts-grid" style="margin-top:16px">
+    <div class="card"><h3>Throughput vs Arrival Rate</h3><canvas id="chart-sweep-tput"></canvas></div>
+    <div class="card"><h3>Latency vs Arrival Rate</h3><canvas id="chart-sweep-lat"></canvas></div>
+  </div>
+  <div class="table-wrap" style="margin-top:8px">
+  <table id="sweep-table">
+    <thead><tr>
+      <th>Arrival Rate<br>(req/s)</th>
+      <th>Throughput<br>(tok/s)</th>
+      <th>TTFT p50<br>(ms)</th>
+      <th>TTFT p99<br>(ms)</th>
+      <th>E2E avg<br>(ms)</th>
+      <th>Completed<br>(%)</th>
+    </tr></thead>
+    <tbody id="sweep-body"></tbody>
+  </table>
+  </div>
+</div>
 
 <script>
 const BENCH = __BENCH_DATA__;
 const DEBUG = __DEBUG_DATA__;
+const SWEEP = __SWEEP_DATA__;
+const SWEEP_ONLY = __SWEEP_ONLY__;
+
+if (SWEEP_ONLY) {
+  document.getElementById("bench-section").style.display = "none";
+  document.getElementById("sweep-section").style.display = "";
+  document.getElementById("run-ts").textContent =
+    (SWEEP && SWEEP.timestamp) ? `sweep_${SWEEP.timestamp}` : "sweep";
+}
+
+// Shared chart colors (used by bench + sweep sections)
+const BLUE  = "rgba(59,130,246,0.85)";
+const GREEN = "rgba(34,197,94,0.85)";
+const AMB   = "rgba(251,191,36,0.85)";
+const PURP  = "rgba(168,85,247,0.85)";
+const RED   = "rgba(239,68,68,0.85)";
+const CYAN  = "rgba(34,211,238,0.85)";
 
 // --- Populate timestamp ---
-document.getElementById("run-ts").textContent = BENCH.timestamp || "unknown";
+if (!SWEEP_ONLY) {
+  document.getElementById("run-ts").textContent = BENCH.timestamp || "unknown";
+}
 
 // --- Populate params bar ---
 (function() {
@@ -191,12 +279,18 @@ document.getElementById("run-ts").textContent = BENCH.timestamp || "unknown";
   const bar = document.getElementById("params-bar");
   if (!Object.keys(p).length) { bar.style.display = "none"; return; }
   const labels = {
+    preset:        "Preset",
+    description:   "Workload",
     model:         "Model",
     gpu:           "GPU",
     max_model_len: "Max context",
     arrival_rate:  "Arrival rate",
     decay_rate:    "Decay rate",
     duration_s:    "Duration (s)",
+    input_min:     "Input min",
+    input_max:     "Input max",
+    output_min:    "Output min",
+    output_max:    "Output max",
     max_input_len: "Max input tok",
     max_output_len:"Max output tok",
     num_trials:    "Trials",
@@ -376,13 +470,6 @@ function buildCharts(trialIdx) {
   const pctScale = { ...baseLineOpts.scales.y, min: 0, max: 100,
                      ticks: { color: "#64748b", callback: v => v + "%" } };
 
-  const BLUE  = "rgba(59,130,246,0.85)";
-  const GREEN = "rgba(34,197,94,0.85)";
-  const AMB   = "rgba(251,191,36,0.85)";
-  const PURP  = "rgba(168,85,247,0.85)";
-  const RED   = "rgba(239,68,68,0.85)";
-  const CYAN  = "rgba(34,211,238,0.85)";
-
   function lineDs(label, data, color, extra = {}) {
     return { label, data, borderColor: color,
              backgroundColor: color.replace("0.85","0.12"),
@@ -457,6 +544,148 @@ function buildCharts(trialIdx) {
 });
 
 buildCharts(activeTrial);
+
+// --- Sweep section ---
+(function() {
+  if (!SWEEP) return;
+
+  // Support both multi-profile format (SWEEP.profiles) and legacy flat format (SWEEP.results)
+  const profileGroups = SWEEP.profiles && SWEEP.profiles.length
+    ? SWEEP.profiles
+    : [{ profile: { label: "sweep", description: "" }, results: SWEEP.results || [] }];
+
+  if (!profileGroups.length) return;
+  document.getElementById("sweep-section").style.display = "";
+
+  const sp = SWEEP.params || {};
+  const status = SWEEP.status ? ` | status: ${SWEEP.status}` : "";
+  document.getElementById("sweep-subtitle").textContent =
+    `Uniform Poisson arrivals | warmup ${sp.warmup_duration_s ?? "?"}s + measure ${sp.measure_duration_s ?? "?"}s per rate${status}`;
+
+  // All unique rates across profiles (for a common x-axis)
+  const allRates = [...new Set(
+    profileGroups.flatMap(g => g.results.map(r => r.arrival_rate))
+  )].sort((a, b) => a - b);
+  const rateLabels = allRates.map(r => r + " req/s");
+
+  const PROFILE_COLORS = [
+    { line: GREEN, lat50: "rgba(34,211,238,0.85)", lat99: "rgba(251,191,36,0.85)", e2e: "rgba(239,68,68,0.85)" },
+    { line: BLUE,  lat50: "rgba(147,197,253,0.85)", lat99: "rgba(253,186,116,0.85)", e2e: "rgba(252,165,165,0.85)" },
+    { line: PURP,  lat50: "rgba(196,181,253,0.85)", lat99: "rgba(253,230,138,0.85)", e2e: "rgba(254,202,202,0.85)" },
+  ];
+
+  const sweepBaseOpts = {
+    responsive: true,
+    animation: false,
+    plugins: { legend: { position: "bottom", labels: { color: "#94a3b8", boxWidth: 12 } } },
+    scales: {
+      x: { ticks: { color: "#64748b" }, grid: { color: "#1e293b" },
+           title: { display: true, text: "arrival rate (req/s)", color: "#64748b" } },
+      y: { ticks: { color: "#64748b" }, grid: { color: "#334155" } },
+    },
+  };
+
+  function lookupRate(results, rate, field) {
+    const r = results.find(x => x.arrival_rate === rate);
+    if (!r || (r.saturated && !("throughput" in r))) return null;
+    const v = r[field];
+    return v != null ? v : null;
+  }
+
+  // --- Throughput chart: one line per profile ---
+  new Chart(document.getElementById("chart-sweep-tput"), {
+    type: "line",
+    data: {
+      labels: rateLabels,
+      datasets: profileGroups.map((g, i) => {
+        const col = PROFILE_COLORS[i % PROFILE_COLORS.length];
+        return {
+          label: g.profile.label,
+          data: allRates.map(r => {
+            const v = lookupRate(g.results, r, "throughput");
+            return v != null ? +v.toFixed(1) : null;
+          }),
+          borderColor: col.line,
+          backgroundColor: col.line.replace("0.85","0.12"),
+          borderWidth: 2, pointRadius: 4, fill: false, tension: 0.2,
+          spanGaps: false,
+        };
+      }),
+    },
+    options: sweepBaseOpts,
+  });
+
+  // --- Latency chart: TTFT p99 per profile (clearest saturation signal) ---
+  new Chart(document.getElementById("chart-sweep-lat"), {
+    type: "line",
+    data: {
+      labels: rateLabels,
+      datasets: profileGroups.flatMap((g, i) => {
+        const col = PROFILE_COLORS[i % PROFILE_COLORS.length];
+        return [
+          {
+            label: `${g.profile.label} — TTFT p99`,
+            data: allRates.map(r => {
+              const v = lookupRate(g.results, r, "p99_ttft");
+              return v != null ? +(v * 1000).toFixed(1) : null;
+            }),
+            borderColor: col.lat99, backgroundColor: "transparent",
+            borderWidth: 2, pointRadius: 4, fill: false, tension: 0.2,
+            borderDash: [],
+            spanGaps: false,
+          },
+          {
+            label: `${g.profile.label} — E2E avg`,
+            data: allRates.map(r => {
+              const v = lookupRate(g.results, r, "avg_e2e");
+              return v != null ? +(v * 1000).toFixed(1) : null;
+            }),
+            borderColor: col.e2e, backgroundColor: "transparent",
+            borderWidth: 1.5, pointRadius: 3, fill: false, tension: 0.2,
+            borderDash: [4, 3],
+            spanGaps: false,
+          },
+        ];
+      }),
+    },
+    options: { ...sweepBaseOpts,
+      scales: { ...sweepBaseOpts.scales,
+        y: { ...sweepBaseOpts.scales.y,
+             title: { display: true, text: "latency (ms)", color: "#64748b" } } },
+    },
+  });
+
+  // --- Per-profile tables ---
+  const sbody = document.getElementById("sweep-body");
+
+  profileGroups.forEach((g, gi) => {
+    // Profile header row
+    const hdr = document.createElement("tr");
+    hdr.innerHTML = `<td colspan="7" style="background:#0f172a;color:#7dd3fc;font-weight:700;padding:10px 14px">
+      ${g.profile.label} — ${g.profile.description || ""}
+    </td>`;
+    sbody.appendChild(hdr);
+
+    g.results.forEach(r => {
+      const tr = document.createElement("tr");
+      if (r.saturated && !("throughput" in r)) {
+        tr.style.color = "#64748b";
+        tr.innerHTML = `<td>${r.arrival_rate}</td><td colspan="5" style="text-align:left">skipped (saturated)</td>`;
+      } else {
+        const pct = r.num_submitted ? (r.num_requests / r.num_submitted * 100).toFixed(0) + "%" : "—";
+        if (r.saturated) tr.style.color = "#f87171";
+        tr.innerHTML = `
+          <td>${r.arrival_rate}</td>
+          <td>${r.throughput?.toFixed(1) ?? "—"}</td>
+          <td>${r.p50_ttft != null ? (r.p50_ttft*1000).toFixed(0) : "—"}</td>
+          <td>${r.p99_ttft != null ? (r.p99_ttft*1000).toFixed(0) : "—"}</td>
+          <td>${r.avg_e2e  != null ? (r.avg_e2e *1000).toFixed(0) : "—"}</td>
+          <td>${pct}</td>`;
+      }
+      sbody.appendChild(tr);
+    });
+  });
+})();
 </script>
 </body>
 </html>
@@ -467,11 +696,15 @@ buildCharts(activeTrial);
 # HTTP server
 # ---------------------------------------------------------------------------
 
-def build_page(bench_data: dict, debug_events: list[dict]) -> str:
+def build_page(bench_data: dict, debug_events: list[dict], sweep_data: dict | None,
+               *, sweep_only: bool = False) -> str:
     bench_json = json.dumps(bench_data, indent=None)
     debug_json = json.dumps(debug_events, indent=None)
+    sweep_json = json.dumps(sweep_data, indent=None) if sweep_data else "null"
     html = HTML_TEMPLATE.replace("__BENCH_DATA__", bench_json)
     html = html.replace("__DEBUG_DATA__", debug_json)
+    html = html.replace("__SWEEP_DATA__", sweep_json)
+    html = html.replace("__SWEEP_ONLY__", "true" if sweep_only else "false")
     return html
 
 
@@ -504,12 +737,26 @@ def serve(html: str, port: int):
 def main():
     parser = argparse.ArgumentParser(description="nano-vllm benchmark dashboard")
     parser.add_argument("--timestamp", default=None,
-                        help="Run timestamp (YYYYMMDD_HHMMSS). Defaults to latest.")
+                        help="Run timestamp (YYYYMMDD_HHMMSS). For --sweep, selects sweep_TIMESTAMP.json.")
+    parser.add_argument("--sweep", action="store_true",
+                        help="Sweep-only mode: load sweep_*.json (no bench/debug required).")
     parser.add_argument("--port", type=int, default=PORT)
     args = parser.parse_args()
 
-    bench_data, debug_events = fetch_volume_files(args.timestamp)
-    html = build_page(bench_data, debug_events)
+    if args.sweep:
+        sweep_data = fetch_sweep_only(args.timestamp)
+        bench_data = {
+            "timestamp": sweep_data.get("timestamp", "unknown"),
+            "warmup": {},
+            "trials": [],
+            "params": sweep_data.get("params", {}),
+        }
+        debug_events = []
+        html = build_page(bench_data, debug_events, sweep_data, sweep_only=True)
+    else:
+        bench_data, debug_events, sweep_data = fetch_volume_files(args.timestamp)
+        html = build_page(bench_data, debug_events, sweep_data)
+
     serve(html, args.port)
 
 
