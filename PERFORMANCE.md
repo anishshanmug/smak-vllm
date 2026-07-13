@@ -1,6 +1,6 @@
 # Performance Changelog
 
-Tracks engine changes and their effect on serving performance. Each stage is measured with the same sweep harness (`test/sweep_bench.py`).
+Tracks engine changes and their effect on serving performance. Each stage is measured with the same sweep harness (`test/bench/sweep_bench.py`).
 
 **Test config:** Modal A10 · Qwen3-0.6B · `max_model_len=4096` · CUDA graphs · Poisson arrivals · rates 1–48 req/s · [sweep_20260712_031259](logs/sweep_20260712_031259.json)
 

@@ -10,9 +10,9 @@ Design goals:
   - Incremental checkpointing after every rate point
 
 Usage (Modal):
-    modal run test/sweep_bench.py
-    modal run -d test/sweep_bench.py
-    modal run test/sweep_bench.py::sweep_test --rates '[1,2,4,8,16,32]'
+    modal run test/bench/sweep_bench.py
+    modal run -d test/bench/sweep_bench.py
+    modal run test/bench/sweep_bench.py::sweep_test --rates '[1,2,4,8,16,32]'
 
 Results are saved as sweep_TIMESTAMP.json to the nano-vllm-logs volume and
 can be viewed via:

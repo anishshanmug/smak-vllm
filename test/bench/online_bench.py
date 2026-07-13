@@ -1,10 +1,10 @@
 """Online serving benchmark with workload presets.
 
 Usage (Modal):
-    modal run test/online_bench.py::load_test --preset balanced
-    modal run test/online_bench.py::load_test --preset decode-heavy
-    modal run test/online_bench.py::load_test --preset prefill-heavy
-    modal run test/online_bench.py::load_test --preset balanced --num-trials 3
+    modal run test/bench/online_bench.py::load_test --preset balanced
+    modal run test/bench/online_bench.py::load_test --preset decode-heavy
+    modal run test/bench/online_bench.py::load_test --preset prefill-heavy
+    modal run test/bench/online_bench.py::load_test --preset balanced --num-trials 3
 
 Results saved as bench_TIMESTAMP.json; view with:
     python scripts/bench_dashboard.py

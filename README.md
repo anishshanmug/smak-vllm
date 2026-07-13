@@ -51,16 +51,16 @@ Most benchmarking happens on Modal — no local GPU required.
 poetry install
 
 # Smoke test + download model to volume (first run only)
-modal run test/offline_example.py
+modal run test/bench/offline_example.py
 
 # Offline throughput
-modal run test/offline_bench.py
+modal run test/bench/offline_bench.py
 
 # Online load test (steady-state, sub-saturation)
-modal run test/online_bench.py::load_test --preset balanced
+modal run test/bench/online_bench.py::load_test --preset balanced
 
 # Saturation sweep (find throughput knee)
-modal run test/sweep_bench.py
+modal run test/bench/sweep_bench.py
 
 # Visualize results locally
 python scripts/bench_dashboard.py
@@ -80,7 +80,7 @@ The evaluation workflow is: **sweep → pick a sub-saturation rate → online be
 Sweep arrival rates across three workload profiles to map the throughput ceiling and latency knee:
 
 ```bash
-modal run test/sweep_bench.py
+modal run test/bench/sweep_bench.py
 ```
 
 Results are checkpointed after every rate point and saved as `sweep_TIMESTAMP.json`.
@@ -90,9 +90,9 @@ Results are checkpointed after every rate point and saved as `sweep_TIMESTAMP.js
 Use a preset tuned to sit just below saturation (rates derived from sweep data):
 
 ```bash
-modal run test/online_bench.py::load_test --preset decode-heavy
-modal run test/online_bench.py::load_test --preset balanced
-modal run test/online_bench.py::load_test --preset prefill-heavy
+modal run test/bench/online_bench.py::load_test --preset decode-heavy
+modal run test/bench/online_bench.py::load_test --preset balanced
+modal run test/bench/online_bench.py::load_test --preset prefill-heavy
 ```
 
 | Preset | What it stresses | Arrival rate |
@@ -128,7 +128,7 @@ Change a mechanism, re-run the sweep or online bench, and compare results in the
 Enable structured debug logging during a bench run:
 
 ```bash
-modal run test/online_bench.py::load_test --preset balanced --debug
+modal run test/bench/online_bench.py::load_test --preset balanced --debug
 ```
 
 Or set `NANOVLLM_DEBUG=1` for local runs.
@@ -166,7 +166,7 @@ huggingface-cli download --resume-download Qwen/Qwen3-0.6B \
   --local-dir-use-symlinks False
 ```
 
-Or use Modal — `test/offline_example.py` downloads Qwen3-0.6B into the `nano-vllm-models` volume on first run.
+Or use Modal — `test/bench/offline_example.py` downloads Qwen3-0.6B into the `nano-vllm-models` volume on first run.
 
 ## Inherited from upstream
 
