@@ -33,6 +33,7 @@ class BlockManager:
         self.hash_to_block_id: dict[int, int] = dict()
         self.free_block_ids: deque[int] = deque(range(num_blocks))
         self.used_block_ids: set[int] = set()
+        self.num_blocks = num_blocks
 
     @classmethod
     def compute_hash(cls, token_ids: list[int], prefix: int = -1):
@@ -41,6 +42,10 @@ class BlockManager:
             h.update(prefix.to_bytes(8, "little"))
         h.update(np.array(token_ids).tobytes())
         return h.intdigest()
+
+    @property
+    def block_capacity(self):
+        return self.num_blocks * self.kv_capacity_threshold
 
     def _allocate_block(self, block_id: int) -> Block:
         block = self.blocks[block_id]
@@ -56,7 +61,7 @@ class BlockManager:
         self.free_block_ids.append(block_id)
 
     def can_allocate(self, seq: Sequence) -> bool:
-        return math.floor(len(self.free_block_ids) * self.kv_capacity_threshold) >= seq.num_blocks
+        return self.block_capacity - len(self.used_block_ids) >= seq.num_blocks
 
     def allocate(self, seq: Sequence):
         assert not seq.block_table
