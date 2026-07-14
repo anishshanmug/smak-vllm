@@ -218,6 +218,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <div class="card"><h3>Request Arrivals (cumulative)</h3><canvas id="chart-arrivals"></canvas></div>
   <div class="card"><h3>Queue Depth (Waiting vs Running)</h3><canvas id="chart-queue"></canvas></div>
   <div class="card"><h3>KV Cache Utilization (%)</h3><canvas id="chart-kv"></canvas></div>
+  <div class="card"><h3>Preemptions (per step)</h3><canvas id="chart-preempt"></canvas></div>
   <div class="card"><h3>Step Latency (ms)</h3><canvas id="chart-step"></canvas></div>
   <div class="card"><h3>Batch Size</h3><canvas id="chart-batch"></canvas></div>
   <div class="card"><h3>Decode Padding Waste (%)</h3><canvas id="chart-padding"></canvas></div>
@@ -386,7 +387,7 @@ function buildCharts(trialIdx) {
   const allEvts  = trialEvents[trialIdx] || [];
   const schedEvts = allEvts.filter(e => e.event === "schedule");
 
-  const ALL_IDS = ["chart-arrivals","chart-queue","chart-kv","chart-step",
+  const ALL_IDS = ["chart-arrivals","chart-queue","chart-kv","chart-preempt","chart-step",
                    "chart-batch","chart-padding","chart-gpu"];
 
   if (!schedEvts.length) {
@@ -426,8 +427,12 @@ function buildCharts(trialIdx) {
     return arriveEvts.filter(a => a.ts <= sched.ts).length;
   });
 
-  // preemption markers (kept for future annotation use)
-  const preemptTs = allEvts.filter(e => e.event === "preempt").map(e => e.ts);
+  // --- Preemptions per step window (between consecutive schedule events) ---
+  const preemptEvts = allEvts.filter(e => e.event === "preempt");
+  const preemptPerStep = schedEvts.map((sched, i) => {
+    const prevTs = i === 0 ? -Infinity : schedEvts[i - 1].ts;
+    return preemptEvts.filter(p => p.ts > prevTs && p.ts <= sched.ts).length;
+  });
 
   // --- Per-step GPU busy % (forward_ms / step_ms * 100) ---
   const preEvts  = allEvts.filter(e => e.event === "pre_forward");
@@ -498,6 +503,19 @@ function buildCharts(trialIdx) {
     type: "line",
     data: { labels, datasets: [ lineDs("KV util %", kvUtil, AMB) ] },
     options: { ...baseLineOpts, scales: { ...baseLineOpts.scales, y: pctScale } },
+  }));
+
+  // Preemptions
+  activeCharts.push(new Chart(document.getElementById("chart-preempt"), {
+    type: "line",
+    data: { labels, datasets: [
+      lineDs("Preemptions", preemptPerStep, RED, { fill: true, pointRadius: 0 }),
+    ]},
+    options: { ...baseLineOpts,
+      scales: { ...baseLineOpts.scales,
+        y: { ...baseLineOpts.scales.y, min: 0, beginAtZero: true,
+             title: { display: true, text: "count", color: "#64748b" } } },
+    },
   }));
 
   // Step latency
