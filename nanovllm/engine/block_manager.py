@@ -1,6 +1,7 @@
 from collections import deque
 import xxhash
 import numpy as np
+import math
 
 from nanovllm.engine.sequence import Sequence
 
@@ -25,8 +26,9 @@ class Block:
 
 class BlockManager:
 
-    def __init__(self, num_blocks: int, block_size: int):
+    def __init__(self, num_blocks: int, block_size: int, kv_capacity_threshold: float):
         self.block_size = block_size
+        self.kv_capacity_threshold = kv_capacity_threshold
         self.blocks: list[Block] = [Block(i) for i in range(num_blocks)]
         self.hash_to_block_id: dict[int, int] = dict()
         self.free_block_ids: deque[int] = deque(range(num_blocks))
@@ -54,7 +56,7 @@ class BlockManager:
         self.free_block_ids.append(block_id)
 
     def can_allocate(self, seq: Sequence) -> bool:
-        return len(self.free_block_ids) >= seq.num_blocks
+        return math.floor(len(self.free_block_ids) * self.kv_capacity_threshold) >= seq.num_blocks
 
     def allocate(self, seq: Sequence):
         assert not seq.block_table
