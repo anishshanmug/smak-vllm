@@ -16,7 +16,8 @@ class Config:
     eos: int = -1
     kvcache_block_size: int = 256
     num_kvcache_blocks: int = -1
-    kv_capacity_threshold: float = 0.85
+    kv_capacity_threshold: float = 0.80
+    chunk_size: int = 512
     def __post_init__(self):
         assert os.path.isdir(self.model)
         assert self.kvcache_block_size % 256 == 0

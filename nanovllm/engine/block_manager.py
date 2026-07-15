@@ -26,7 +26,7 @@ class Block:
 
 class BlockManager:
 
-    def __init__(self, num_blocks: int, block_size: int, kv_capacity_threshold: float):
+    def __init__(self, num_blocks: int, block_size: int, kv_capacity_threshold: float, chunk_size: int):
         self.block_size = block_size
         self.kv_capacity_threshold = kv_capacity_threshold
         self.blocks: list[Block] = [Block(i) for i in range(num_blocks)]
@@ -34,6 +34,7 @@ class BlockManager:
         self.free_block_ids: deque[int] = deque(range(num_blocks))
         self.used_block_ids: set[int] = set()
         self.num_blocks = num_blocks
+        self.chunk_size = chunk_size
 
     @classmethod
     def compute_hash(cls, token_ids: list[int], prefix: int = -1):
@@ -60,14 +61,34 @@ class BlockManager:
         self.used_block_ids.remove(block_id)
         self.free_block_ids.append(block_id)
 
-    def can_allocate(self, seq: Sequence) -> bool:
-        return self.block_capacity - len(self.used_block_ids) >= seq.num_blocks
+    def can_allocate(self, seq: Sequence, num_tokens: int | None = None) -> bool:
+        if num_tokens is None:
+            num_tokens = min(
+                self.chunk_size,
+                seq.num_prompt_tokens - seq.num_chunked_tokens,
+            )
+        end_token = seq.num_chunked_tokens + num_tokens
+        required_blocks = (end_token + self.block_size - 1) // self.block_size
+        additional_blocks = required_blocks - len(seq.block_table)
+        return (
+            additional_blocks >= 0
+            and self.block_capacity - len(self.used_block_ids) >= additional_blocks
+            and len(self.free_block_ids) >= additional_blocks
+        )
 
-    def allocate(self, seq: Sequence):
-        assert not seq.block_table
-        h = -1
+    def allocate(self, seq: Sequence, num_tokens: int | None = None):
+        if num_tokens is None:
+            num_tokens = min(
+                self.chunk_size,
+                seq.num_prompt_tokens - seq.num_chunked_tokens,
+            )
+        end_token = seq.num_chunked_tokens + num_tokens
+        required_blocks = (end_token + self.block_size - 1) // self.block_size
+        assert self.can_allocate(seq, num_tokens)
+
+        h = self.blocks[seq.block_table[-1]].hash if seq.block_table else -1
         cache_miss = False
-        for i in range(seq.num_blocks):
+        for i in range(len(seq.block_table), required_blocks):
             token_ids = seq.block(i)
             h = self.compute_hash(token_ids, h) if len(token_ids) == self.block_size else -1
             block_id = self.hash_to_block_id.get(h, -1)
